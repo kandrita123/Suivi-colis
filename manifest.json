@@ -1,0 +1,14 @@
+{
+  "name": "Suivi de colis",
+  "short_name": "Suivi colis",
+  "description": "Suivi des colis en cours, avec stockage 100% local sur l'appareil",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#EDE6D6",
+  "theme_color": "#24291F",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
