@@ -1,0 +1,677 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover" />
+<title>Suivi de colis</title>
+<meta name="description" content="Suivi des colis en cours — enregistrement 100% local" />
+<meta name="theme-color" content="#24291F" />
+<link rel="manifest" href="manifest.json" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Suivi colis" />
+<link rel="apple-touch-icon" href="apple-touch-icon.png" />
+<link rel="icon" href="icon-192.png" />
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Bitter:wght@700;800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500;700&display=swap');
+  * { box-sizing: border-box; }
+  :root { padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); }
+  html { scroll-padding-top: env(safe-area-inset-top, 0px); }
+  body { margin: 0; background: #EDE6D6; font-family: 'Inter', system-ui, sans-serif; color: #24291F; -webkit-tap-highlight-color: transparent; }
+  #root { min-height: 100vh; }
+  .perforated {
+    background-image: radial-gradient(circle at 0 50%, #EDE6D6 5px, transparent 5.5px);
+    background-size: 100% 16px;
+    background-repeat: repeat-y;
+    background-position: left center;
+  }
+  .barcode {
+    background-image: repeating-linear-gradient(90deg, #24291F 0px, #24291F 2px, transparent 2px, transparent 4px, #24291F 4px, #24291F 5px, transparent 5px, transparent 9px);
+    height: 22px;
+    opacity: 0.85;
+  }
+  button { font-family: inherit; cursor: pointer; }
+  input, select, textarea { font-family: inherit; font-size: 16px; }
+  ::-webkit-scrollbar { display: none; }
+</style>
+</head>
+<body>
+<div id="root">
+  <div style="padding:40px 20px;text-align:center;color:#8A8272;">Chargement…</div>
+</div>
+
+<script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+const SITES = ["Amazon", "Vinted", "Cdiscount", "Fnac", "La Redoute", "Leboncoin", "Autre"];
+const TRANSPORTEURS = ["Colissimo", "Chronopost", "Mondial Relay", "UPS", "DPD", "DHL", "GLS", "Autre"];
+
+const STATUTS = [
+  { id: "preparation", label: "En préparation", color: "#8A8272", emoji: "📦" },
+  { id: "expedie", label: "Expédié", color: "#C08A2E", emoji: "🚚" },
+  { id: "transit", label: "En transit", color: "#B8452F", emoji: "🚚" },
+  { id: "livre", label: "Livré au point de retrait", color: "#3D5A80", emoji: "📍" },
+  { id: "recupere", label: "Récupéré", color: "#2F5F4A", emoji: "✅" },
+];
+const statutInfo = (id) => STATUTS.find((s) => s.id === id) || STATUTS[0];
+
+const LIEUX_PAR_DEFAUT = [
+  { id: "defaut-1", nom: "Pickup Jaurès", adresse: "Bd Jean Jaurès, Boulogne-Billancourt", horaires: "" },
+  { id: "defaut-2", nom: "La Poste Sud", adresse: "240 bd Jean Jaurès, Boulogne-Billancourt", horaires: "" },
+  { id: "defaut-3", nom: "ZMC Multimédia", adresse: "Boulogne-Billancourt", horaires: "" },
+];
+
+function todayISO() { return new Date().toISOString().slice(0, 10); }
+function formatDateFR(iso) {
+  if (!iso) return "";
+  const [y, m, d] = iso.split("-");
+  return `${d}/${m}/${y}`;
+}
+function urgenceLimite(iso) {
+  if (!iso) return null;
+  const today = new Date(todayISO());
+  const limite = new Date(iso);
+  const diffJours = Math.round((limite - today) / 86400000);
+  if (diffJours < 0) return { niveau: "depassee", diffJours };
+  if (diffJours <= 3) return { niveau: "proche", diffJours };
+  return { niveau: "ok", diffJours };
+}
+
+// Stockage 100% local sur l'appareil — aucune donnée n'est envoyée à un serveur
+function chargerLocal(cle, defaut) {
+  try {
+    const raw = localStorage.getItem(cle);
+    return raw ? JSON.parse(raw) : defaut;
+  } catch (e) {
+    console.error("Lecture locale impossible :", e);
+    return defaut;
+  }
+}
+function sauverLocal(cle, valeur) {
+  try {
+    localStorage.setItem(cle, JSON.stringify(valeur));
+    return true;
+  } catch (e) {
+    console.error("Écriture locale impossible :", e);
+    return false;
+  }
+}
+
+function compressImage(file, maxWidth = 800, quality = 0.7) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Lecture du fichier impossible"));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("Image illisible"));
+      img.onload = () => {
+        const scale = Math.min(1, maxWidth / img.width);
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.round(img.width * scale);
+        canvas.height = Math.round(img.height * scale);
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function dataUrlToFile(dataUrl, filename) {
+  const arr = dataUrl.split(",");
+  const mimeMatch = arr[0].match(/:(.*?);/);
+  const mime = mimeMatch ? mimeMatch[1] : "image/jpeg";
+  const bstr = atob(arr[1]);
+  let n = bstr.length;
+  const u8arr = new Uint8Array(n);
+  while (n--) u8arr[n] = bstr.charCodeAt(n);
+  return new File([u8arr], filename, { type: mime });
+}
+
+function ficheTexte(parcel) {
+  const info = statutInfo(parcel.statut);
+  const lignes = [
+    "📦 Colis à récupérer",
+    `Site de commande : ${parcel.site}`,
+    `N° de suivi : ${parcel.numeroSuivi}`,
+    `Transporteur : ${parcel.transporteur}`,
+    `Lieu : ${parcel.lieuNom}`,
+  ];
+  if (parcel.lieuAdresse) lignes.push(`Adresse : ${parcel.lieuAdresse}`);
+  if (parcel.lieuHoraires) lignes.push(`Horaires : ${parcel.lieuHoraires}`);
+  if (parcel.dateLimiteRetrait) lignes.push(`À retirer avant le : ${formatDateFR(parcel.dateLimiteRetrait)}`);
+  lignes.push(`Statut : ${info.label}`);
+  if (parcel.photo) lignes.push("Le QR code / la photo est joint(e) séparément.");
+  return lignes.join("\n");
+}
+
+const emptyForm = {
+  site: SITES[0], siteAutre: "",
+  dateCommande: todayISO(),
+  numeroSuivi: "",
+  transporteur: TRANSPORTEURS[0], transporteurAutre: "",
+  lieuChoice: "", lieuNomAutre: "", lieuAdresseAutre: "", lieuHorairesAutre: "", sauvegarderLieu: true,
+  statut: "preparation",
+  dateLimiteRetrait: "",
+  photo: null,
+};
+const emptyLieuForm = { nom: "", adresse: "", horaires: "" };
+
+function SuiviColis() {
+  const [colis, setColis] = useState(() => chargerLocal("colis", []));
+  const [lieux, setLieux] = useState(() => {
+    const saved = chargerLocal("lieux", null);
+    return saved && saved.length ? saved : LIEUX_PAR_DEFAUT;
+  });
+  const [showForm, setShowForm] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const [form, setForm] = useState(emptyForm);
+  const [filtre, setFiltre] = useState("tous");
+  const [photoBusy, setPhotoBusy] = useState(false);
+  const [viewerPhoto, setViewerPhoto] = useState(null);
+  const [formError, setFormError] = useState("");
+  const [error, setError] = useState("");
+  const fileInputRef = useRef(null);
+
+  const [showLieuxManager, setShowLieuxManager] = useState(false);
+  const [lieuForm, setLieuForm] = useState(emptyLieuForm);
+  const [lieuFormError, setLieuFormError] = useState("");
+
+  const [ficheParcelId, setFicheParcelId] = useState(null);
+  const [ficheMsg, setFicheMsg] = useState("");
+  const importInputRef = useRef(null);
+  const [importMsg, setImportMsg] = useState("");
+
+  useEffect(() => { sauverLocal("colis", colis); }, [colis]);
+  useEffect(() => { sauverLocal("lieux", lieux); }, [lieux]);
+
+  function openNewForm() {
+    setForm({ ...emptyForm, lieuChoice: lieux[0]?.id || "autre" });
+    setEditingId(null); setFormError(""); setShowForm(true);
+  }
+
+  function openEditForm(parcel) {
+    const presetMatch = lieux.find((l) => l.nom === parcel.lieuNom);
+    setForm({
+      site: SITES.includes(parcel.site) ? parcel.site : "Autre",
+      siteAutre: SITES.includes(parcel.site) ? "" : parcel.site,
+      dateCommande: parcel.dateCommande,
+      numeroSuivi: parcel.numeroSuivi,
+      transporteur: TRANSPORTEURS.includes(parcel.transporteur) ? parcel.transporteur : "Autre",
+      transporteurAutre: TRANSPORTEURS.includes(parcel.transporteur) ? "" : parcel.transporteur,
+      lieuChoice: presetMatch ? presetMatch.id : "autre",
+      lieuNomAutre: presetMatch ? "" : parcel.lieuNom || "",
+      lieuAdresseAutre: presetMatch ? "" : parcel.lieuAdresse || "",
+      lieuHorairesAutre: presetMatch ? "" : parcel.lieuHoraires || "",
+      sauvegarderLieu: false,
+      statut: parcel.statut,
+      dateLimiteRetrait: parcel.dateLimiteRetrait || "",
+      photo: parcel.photo || null,
+    });
+    setEditingId(parcel.id); setFormError(""); setShowForm(true);
+  }
+
+  function closeForm() { setShowForm(false); setEditingId(null); setForm(emptyForm); setFormError(""); }
+
+  async function handlePhotoChange(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setPhotoBusy(true); setFormError("");
+    try {
+      const dataUrl = await compressImage(file);
+      setForm((f) => ({ ...f, photo: dataUrl }));
+    } catch (err) {
+      setFormError("La photo n'a pas pu être ajoutée. Réessaie avec une autre image.");
+    } finally {
+      setPhotoBusy(false);
+    }
+  }
+
+  function handleSubmit(e) {
+    e.preventDefault();
+    setFormError("");
+    const site = form.site === "Autre" ? form.siteAutre.trim() : form.site;
+    const transporteur = form.transporteur === "Autre" ? form.transporteurAutre.trim() : form.transporteur;
+    const presetLieu = lieux.find((l) => l.id === form.lieuChoice);
+    const lieuNom = presetLieu ? presetLieu.nom : form.lieuNomAutre.trim();
+    const lieuAdresse = presetLieu ? presetLieu.adresse : form.lieuAdresseAutre.trim();
+    const lieuHoraires = presetLieu ? presetLieu.horaires : form.lieuHorairesAutre.trim();
+
+    if (!site || !form.numeroSuivi.trim() || !transporteur || !lieuNom) {
+      setFormError("Renseigne au moins le site, le numéro de suivi, le transporteur et le lieu de livraison.");
+      return;
+    }
+
+    if (!presetLieu && form.sauvegarderLieu && lieuNom) {
+      const lieuId = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      setLieux((prev) => [...prev, { id: lieuId, nom: lieuNom, adresse: lieuAdresse, horaires: lieuHoraires }].sort((a, b) => a.nom.localeCompare(b.nom)));
+    }
+
+    const id = editingId ?? Date.now();
+    const parcel = {
+      id, site,
+      dateCommande: form.dateCommande || todayISO(),
+      numeroSuivi: form.numeroSuivi.trim(),
+      transporteur, lieuNom, lieuAdresse, lieuHoraires,
+      statut: form.statut,
+      dateLimiteRetrait: form.dateLimiteRetrait || "",
+      photo: form.photo,
+      dateCreation: editingId ? colis.find((c) => c.id === editingId)?.dateCreation || todayISO() : todayISO(),
+    };
+
+    let saveOk = true;
+    setColis((prev) => {
+      const others = prev.filter((c) => c.id !== id);
+      const next = [...others, parcel];
+      next.sort((a, b) => (b.dateCommande || "").localeCompare(a.dateCommande || "") || b.id - a.id);
+      saveOk = sauverLocal("colis", next);
+      return next;
+    });
+    if (!saveOk) {
+      setFormError("Le stockage de ton téléphone semble plein (souvent à cause des photos). Supprime un ancien colis ou une photo, puis réessaie.");
+      return;
+    }
+    closeForm();
+  }
+
+  function handleDelete(id) {
+    setColis((prev) => prev.filter((c) => c.id !== id));
+  }
+
+  function cycleStatut(parcel) {
+    const idx = STATUTS.findIndex((s) => s.id === parcel.statut);
+    const next = STATUTS[(idx + 1) % STATUTS.length];
+    setColis((prev) => prev.map((c) => (c.id === parcel.id ? { ...c, statut: next.id } : c)));
+  }
+
+  function handleLieuFormSubmit(e) {
+    e.preventDefault();
+    setLieuFormError("");
+    if (!lieuForm.nom.trim()) { setLieuFormError("Le nom du lieu est obligatoire."); return; }
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const lieu = { id, nom: lieuForm.nom.trim(), adresse: lieuForm.adresse.trim(), horaires: lieuForm.horaires.trim() };
+    setLieux((prev) => [...prev, lieu].sort((a, b) => a.nom.localeCompare(b.nom)));
+    setLieuForm(emptyLieuForm);
+  }
+
+  function handleLieuDelete(id) {
+    setLieux((prev) => prev.filter((l) => l.id !== id));
+  }
+
+  async function handleShareFiche(parcel) {
+    setFicheMsg("");
+    const texte = ficheTexte(parcel);
+    try {
+      if (parcel.photo && navigator.canShare) {
+        const file = dataUrlToFile(parcel.photo, "qr-colis.jpg");
+        if (navigator.canShare({ files: [file] })) {
+          await navigator.share({ title: "Colis à récupérer", text: texte, files: [file] });
+          return;
+        }
+      }
+      if (navigator.share) { await navigator.share({ title: "Colis à récupérer", text: texte }); return; }
+      throw new Error("share indisponible");
+    } catch (e) {
+      try {
+        await navigator.clipboard.writeText(texte);
+        setFicheMsg("Copié dans le presse-papiers !");
+      } catch (e2) {
+        setFicheMsg("Copie automatique indisponible : sélectionne le texte ci-dessous manuellement.");
+      }
+    }
+  }
+
+  async function handleCopyFiche(parcel) {
+    setFicheMsg("");
+    try {
+      await navigator.clipboard.writeText(ficheTexte(parcel));
+      setFicheMsg("Copié dans le presse-papiers !");
+    } catch (e) {
+      setFicheMsg("Copie automatique indisponible : sélectionne le texte ci-dessous manuellement.");
+    }
+  }
+
+  function handleExport() {
+    const data = JSON.stringify({ colis, lieux, exportedAt: new Date().toISOString() }, null, 2);
+    const blob = new Blob([data], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `suivi-colis-sauvegarde-${todayISO()}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  function handleImportFile(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setImportMsg("");
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const data = JSON.parse(reader.result);
+        if (Array.isArray(data.colis)) setColis(data.colis);
+        if (Array.isArray(data.lieux) && data.lieux.length) setLieux(data.lieux);
+        setImportMsg("Importé avec succès !");
+      } catch (err) {
+        setImportMsg("Ce fichier n'est pas une sauvegarde valide.");
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  }
+
+  const visibles = colis.filter((c) => {
+    if (filtre === "tous") return true;
+    if (filtre === "cours") return c.statut !== "recupere";
+    if (filtre === "recuperes") return c.statut === "recupere";
+    return true;
+  });
+  const enCoursCount = colis.filter((c) => c.statut !== "recupere").length;
+  const ficheParcel = ficheParcelId ? colis.find((c) => c.id === ficheParcelId) : null;
+
+  return (
+    <div style={{ background: "#EDE6D6", minHeight: "100vh" }}>
+      <div style={{ background: "#24291F", color: "#EDE6D6", padding: "28px 20px 24px" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, opacity: 0.7, fontSize: 12, letterSpacing: 2, textTransform: "uppercase", fontFamily: "'JetBrains Mono', monospace" }}>
+            📦 Manifeste personnel
+          </div>
+          <button onClick={() => setShowLieuxManager(true)} aria-label="Gérer mes lieux" style={{ background: "none", border: "none", color: "#EDE6D6", opacity: 0.85, fontSize: 20 }}>
+            ⚙️
+          </button>
+        </div>
+        <h1 style={{ fontFamily: "'Bitter', serif", fontWeight: 800, fontSize: 28, margin: "4px 0 0" }}>Suivi de colis</h1>
+        <p style={{ fontSize: 14, marginTop: 4, color: "#B8B09A" }}>
+          {enCoursCount > 0 ? `${enCoursCount} colis en cours sur ${colis.length}` : colis.length > 0 ? "Tous vos colis sont récupérés" : "Aucun colis suivi pour le moment"}
+        </p>
+        <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+          <button onClick={handleExport} style={{ background: "rgba(237,230,214,0.15)", color: "#EDE6D6", border: "none", borderRadius: 999, padding: "5px 11px", fontSize: 12 }}>⬇️ Exporter une sauvegarde</button>
+          <button onClick={() => importInputRef.current?.click()} style={{ background: "rgba(237,230,214,0.15)", color: "#EDE6D6", border: "none", borderRadius: 999, padding: "5px 11px", fontSize: 12 }}>⬆️ Importer</button>
+          <input ref={importInputRef} type="file" accept="application/json" onChange={handleImportFile} style={{ display: "none" }} />
+        </div>
+        {importMsg && <div style={{ fontSize: 12, marginTop: 6, color: "#B8B09A" }}>{importMsg}</div>}
+      </div>
+
+      <div style={{ padding: "12px 20px 0", display: "flex", gap: 8, overflowX: "auto" }}>
+        {[{ id: "tous", label: "Tous" }, { id: "cours", label: "En cours" }, { id: "recuperes", label: "Récupérés" }].map((f) => (
+          <button key={f.id} onClick={() => setFiltre(f.id)} style={{
+            background: filtre === f.id ? "#24291F" : "#F7F3E8",
+            color: filtre === f.id ? "#EDE6D6" : "#24291F",
+            border: "1px solid #24291F", whiteSpace: "nowrap",
+            padding: "6px 12px", borderRadius: 999, fontSize: 12, fontWeight: 500,
+          }}>{f.label}</button>
+        ))}
+      </div>
+
+      {error && (
+        <div style={{ margin: "16px 20px 0", padding: "8px 12px", borderRadius: 8, fontSize: 14, background: "#F3DAD1", color: "#8A2E17", border: "1px solid #B8452F" }}>{error}</div>
+      )}
+
+      <main style={{ padding: "20px", display: "flex", flexDirection: "column", gap: 16, paddingBottom: 110 }}>
+        {visibles.length === 0 && (
+          <div style={{ textAlign: "center", padding: "64px 0", borderRadius: 16, background: "#F7F3E8", border: "1px dashed #8A8272" }}>
+            <div style={{ fontSize: 28, marginBottom: 8 }}>📦</div>
+            <p style={{ color: "#5c584d", fontSize: 14 }}>{filtre === "recuperes" ? "Aucun colis récupéré pour l'instant." : "Ajoute ton premier colis à suivre."}</p>
+          </div>
+        )}
+
+        {visibles.map((c) => {
+          const info = statutInfo(c.statut);
+          return (
+            <div key={c.id} className="perforated" style={{ background: "#F7F3E8", borderRadius: 14, boxShadow: "0 1px 3px rgba(36,41,31,0.15)", paddingLeft: 20, position: "relative", overflow: "hidden" }}>
+              <button onClick={() => cycleStatut(c)} title="Toucher pour faire évoluer le statut" style={{
+                position: "absolute", top: 10, right: 10, transform: "rotate(-8deg)",
+                border: `2px solid ${info.color}`, color: info.color, borderRadius: 999, padding: "4px 10px",
+                fontFamily: "'JetBrains Mono', monospace", fontSize: 10, fontWeight: 700, letterSpacing: 0.5,
+                background: "rgba(255,255,255,0.5)",
+              }}>{info.emoji} {info.label.toUpperCase()}</button>
+
+              <div style={{ padding: "16px 16px 16px 0", display: "flex", gap: 12 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#8A8272" }}>
+                    🛍️ {c.site} <span style={{ opacity: 0.5 }}>·</span> 📅 {formatDateFR(c.dateCommande)}
+                  </div>
+                  <div style={{ marginTop: 6, fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 16, paddingRight: 70, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.numeroSuivi}</div>
+                  <div className="barcode" style={{ maxWidth: 160, marginTop: 4 }} />
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 14, marginTop: 8 }}>🚚 {c.transporteur}</div>
+                  <div style={{ display: "flex", alignItems: "flex-start", gap: 6, fontSize: 14, marginTop: 4 }}>
+                    <span>📍</span>
+                    <span>
+                      {c.lieuNom}
+                      {c.lieuAdresse && <span style={{ display: "block", fontSize: 12, color: "#8A8272" }}>{c.lieuAdresse}</span>}
+                      {c.lieuHoraires && <span style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: "#8A8272" }}>⏰ {c.lieuHoraires}</span>}
+                    </span>
+                  </div>
+
+                  {c.dateLimiteRetrait && (() => {
+                    const u = urgenceLimite(c.dateLimiteRetrait);
+                    const styles = {
+                      depassee: { color: "#8A2E17", background: "#F3DAD1", label: `Délai dépassé de ${Math.abs(u.diffJours)} j — risque de retour à l'expéditeur` },
+                      proche: { color: "#8A5A17", background: "#F5E6C8", label: u.diffJours === 0 ? "À retirer aujourd'hui !" : `Plus que ${u.diffJours} j pour le retirer` },
+                      ok: { color: "#3D5A80", background: "#E4EAF1", label: `À retirer avant le ${formatDateFR(c.dateLimiteRetrait)}` },
+                    }[u.niveau];
+                    return (
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, marginTop: 8, padding: "4px 8px", borderRadius: 8, color: styles.color, background: styles.background, width: "fit-content" }}>
+                        ⏰ {styles.label}
+                      </div>
+                    );
+                  })()}
+
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
+                    <button onClick={() => openEditForm(c)} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, padding: "5px 10px", borderRadius: 999, background: "#EDE6D6", color: "#24291F", border: "none" }}>✏️ Modifier</button>
+                    <button onClick={() => { setFicheMsg(""); setFicheParcelId(c.id); }} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, padding: "5px 10px", borderRadius: 999, background: "#EDE6D6", color: "#24291F", border: "none" }}>📤 Fiche à envoyer</button>
+                    <button onClick={() => handleDelete(c.id)} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, padding: "5px 10px", borderRadius: 999, background: "#EDE6D6", color: "#8A2E17", border: "none" }}>🗑️ Supprimer</button>
+                  </div>
+                </div>
+
+                {c.photo ? (
+                  <button onClick={() => setViewerPhoto(c.photo)} style={{ width: 64, height: 64, borderRadius: 10, overflow: "hidden", border: "1px solid #24291F22", flexShrink: 0, padding: 0, background: "none" }}>
+                    <img src={c.photo} alt="QR code / photo du colis" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                  </button>
+                ) : (
+                  <div style={{ width: 64, height: 64, borderRadius: 10, background: "#EDE6D6", display: "flex", alignItems: "center", justifyContent: "center", color: "#8A8272", flexShrink: 0, fontSize: 20 }}>🚫</div>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </main>
+
+      <button onClick={openNewForm} aria-label="Ajouter un colis" style={{
+        position: "fixed", right: 20, bottom: "calc(20px + env(safe-area-inset-bottom, 0px))", background: "#B8452F", color: "#F7F3E8", border: "none",
+        borderRadius: 999, width: 56, height: 56, display: "flex", alignItems: "center", justifyContent: "center",
+        boxShadow: "0 4px 14px rgba(184,69,47,0.45)", fontSize: 26, zIndex: 30,
+      }}>＋</button>
+
+      {viewerPhoto && (
+        <div onClick={() => setViewerPhoto(null)} style={{ position: "fixed", inset: 0, background: "rgba(20,18,12,0.9)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 24 }}>
+          <img src={viewerPhoto} alt="QR code du colis en grand" style={{ maxWidth: "100%", maxHeight: "100%", borderRadius: 12 }} />
+        </div>
+      )}
+
+      {ficheParcel && (
+        <div onClick={() => setFicheParcelId(null)} style={{ position: "fixed", inset: 0, background: "rgba(20,18,12,0.55)", zIndex: 45 }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ position: "absolute", bottom: 0, left: 0, right: 0, background: "#F7F3E8", borderTopLeftRadius: 20, borderTopRightRadius: 20, maxHeight: "88vh", overflowY: "auto", padding: "18px 20px 28px" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+              <h2 style={{ fontFamily: "'Bitter', serif", fontWeight: 800, fontSize: 20, margin: 0 }}>Fiche à envoyer</h2>
+              <button onClick={() => setFicheParcelId(null)} style={{ background: "none", border: "none", fontSize: 20 }}>✕</button>
+            </div>
+            <div className="perforated" style={{ background: "#EDE6D6", borderRadius: 12, padding: "16px 16px 16px 22px", marginBottom: 14 }}>
+              <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 1, color: "#8A8272", fontFamily: "'JetBrains Mono', monospace" }}>Colis à récupérer</div>
+              <div style={{ fontSize: 14, marginTop: 8, lineHeight: 1.7 }}>
+                <div><strong>Site :</strong> {ficheParcel.site}</div>
+                <div><strong>N° de suivi :</strong> <span style={{ fontFamily: "'JetBrains Mono', monospace" }}>{ficheParcel.numeroSuivi}</span></div>
+                <div><strong>Transporteur :</strong> {ficheParcel.transporteur}</div>
+                <div><strong>Lieu :</strong> {ficheParcel.lieuNom}</div>
+                {ficheParcel.lieuAdresse && <div><strong>Adresse :</strong> {ficheParcel.lieuAdresse}</div>}
+                {ficheParcel.lieuHoraires && <div><strong>Horaires :</strong> {ficheParcel.lieuHoraires}</div>}
+                {ficheParcel.dateLimiteRetrait && <div><strong>À retirer avant le :</strong> {formatDateFR(ficheParcel.dateLimiteRetrait)}</div>}
+                <div><strong>Statut :</strong> {statutInfo(ficheParcel.statut).label}</div>
+              </div>
+              {ficheParcel.photo && <img src={ficheParcel.photo} alt="QR code du colis" style={{ width: 88, height: 88, borderRadius: 8, objectFit: "cover", marginTop: 10 }} />}
+            </div>
+            <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+              <button onClick={() => handleShareFiche(ficheParcel)} style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "10px", borderRadius: 12, fontSize: 14, fontWeight: 500, background: "#24291F", color: "#EDE6D6", border: "none" }}>📤 Partager</button>
+              <button onClick={() => handleCopyFiche(ficheParcel)} style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "10px", borderRadius: 12, fontSize: 14, fontWeight: 500, background: "none", color: "#24291F", border: "1px solid #24291F" }}>📋 Copier le texte</button>
+            </div>
+            {ficheMsg && <div style={{ fontSize: 12, marginBottom: 12, color: "#2F5F4A" }}>✓ {ficheMsg}</div>}
+            <label style={{ fontSize: 12, color: "#8A8272" }}>
+              Texte à copier manuellement si besoin
+              <textarea readOnly value={ficheTexte(ficheParcel)} onClick={(e) => e.target.select()} style={{ width: "100%", marginTop: 4, padding: "8px 12px", borderRadius: 8, fontSize: 14, border: "1px solid #8A8272", background: "#fff", minHeight: 110, fontFamily: "'JetBrains Mono', monospace" }} />
+            </label>
+          </div>
+        </div>
+      )}
+
+      {showLieuxManager && (
+        <div onClick={() => setShowLieuxManager(false)} style={{ position: "fixed", inset: 0, background: "rgba(20,18,12,0.55)", zIndex: 45 }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ position: "absolute", bottom: 0, left: 0, right: 0, background: "#F7F3E8", borderTopLeftRadius: 20, borderTopRightRadius: 20, maxHeight: "88vh", overflowY: "auto", padding: "18px 20px 28px" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+              <h2 style={{ fontFamily: "'Bitter', serif", fontWeight: 800, fontSize: 20, margin: 0 }}>Mes lieux favoris</h2>
+              <button onClick={() => setShowLieuxManager(false)} style={{ background: "none", border: "none", fontSize: 20 }}>✕</button>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 20 }}>
+              {lieux.length === 0 && <p style={{ fontSize: 14, color: "#8A8272" }}>Aucun lieu enregistré.</p>}
+              {lieux.map((l) => (
+                <div key={l.id} style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8, padding: 12, borderRadius: 8, background: "#EDE6D6" }}>
+                  <div style={{ fontSize: 14 }}>
+                    <div style={{ fontWeight: 500 }}>{l.nom}</div>
+                    {l.adresse && <div style={{ color: "#8A8272", fontSize: 12 }}>{l.adresse}</div>}
+                    {l.horaires && <div style={{ color: "#8A8272", fontSize: 12 }}>⏰ {l.horaires}</div>}
+                  </div>
+                  <button onClick={() => handleLieuDelete(l.id)} aria-label={`Supprimer ${l.nom}`} style={{ background: "none", border: "none", color: "#8A2E17", flexShrink: 0, fontSize: 16 }}>🗑️</button>
+                </div>
+              ))}
+            </div>
+            <form onSubmit={handleLieuFormSubmit} style={{ display: "flex", flexDirection: "column", gap: 10, paddingTop: 12, borderTop: "1px dashed #8A8272" }}>
+              <h3 style={{ fontSize: 14, fontWeight: 600, margin: "4px 0 0" }}>Ajouter un lieu</h3>
+              {lieuFormError && <div style={{ padding: "8px 12px", borderRadius: 8, fontSize: 14, background: "#F3DAD1", color: "#8A2E17", border: "1px solid #B8452F" }}>{lieuFormError}</div>}
+              <input type="text" placeholder="Nom (ex. Pickup Jaurès)" value={lieuForm.nom} onChange={(e) => setLieuForm((f) => ({ ...f, nom: e.target.value }))} style={{ width: "100%", padding: "8px 12px", borderRadius: 8, border: "1px solid #8A8272" }} />
+              <input type="text" placeholder="Adresse" value={lieuForm.adresse} onChange={(e) => setLieuForm((f) => ({ ...f, adresse: e.target.value }))} style={{ width: "100%", padding: "8px 12px", borderRadius: 8, border: "1px solid #8A8272" }} />
+              <input type="text" placeholder="Horaires d'ouverture" value={lieuForm.horaires} onChange={(e) => setLieuForm((f) => ({ ...f, horaires: e.target.value }))} style={{ width: "100%", padding: "8px 12px", borderRadius: 8, border: "1px solid #8A8272" }} />
+              <button type="submit" style={{ padding: "10px", borderRadius: 12, fontSize: 14, fontWeight: 600, background: "#24291F", color: "#EDE6D6", border: "none" }}>Ajouter ce lieu</button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {showForm && (
+        <div onClick={closeForm} style={{ position: "fixed", inset: 0, background: "rgba(20,18,12,0.55)", zIndex: 40 }}>
+          <form onClick={(e) => e.stopPropagation()} onSubmit={handleSubmit} style={{ position: "absolute", bottom: 0, left: 0, right: 0, background: "#F7F3E8", borderTopLeftRadius: 20, borderTopRightRadius: 20, maxHeight: "88vh", overflowY: "auto", padding: "18px 20px 28px" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+              <h2 style={{ fontFamily: "'Bitter', serif", fontWeight: 800, fontSize: 20, margin: 0 }}>{editingId ? "Modifier le colis" : "Nouveau colis"}</h2>
+              <button type="button" onClick={closeForm} style={{ background: "none", border: "none", fontSize: 20 }}>✕</button>
+            </div>
+
+            {formError && <div style={{ marginBottom: 16, padding: "8px 12px", borderRadius: 8, fontSize: 14, background: "#F3DAD1", color: "#8A2E17", border: "1px solid #B8452F" }}>{formError}</div>}
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+              <label style={{ fontSize: 14 }}>
+                <span style={{ display: "block", marginBottom: 4, fontWeight: 500 }}>Site de commande</span>
+                <select value={form.site} onChange={(e) => setForm((f) => ({ ...f, site: e.target.value }))} style={{ width: "100%", padding: "8px 12px", borderRadius: 8, border: "1px solid #8A8272", background: "#fff" }}>
+                  {SITES.map((s) => <option key={s} value={s}>{s}</option>)}
+                </select>
+                {form.site === "Autre" && <input type="text" placeholder="Nom du site" value={form.siteAutre} onChange={(e) => setForm((f) => ({ ...f, siteAutre: e.target.value }))} style={{ width: "100%", padding: "8px 12px", borderRadius: 8, marginTop: 8, border: "1px solid #8A8272" }} />}
+              </label>
+
+              <label style={{ fontSize: 14 }}>
+                <span style={{ display: "block", marginBottom: 4, fontWeight: 500 }}>Date de commande</span>
+                <input type="date" value={form.dateCommande} onChange={(e) => setForm((f) => ({ ...f, dateCommande: e.target.value }))} style={{ width: "100%", padding: "8px 12px", borderRadius: 8, border: "1px solid #8A8272", background: "#fff" }} />
+              </label>
+
+              <label style={{ fontSize: 14 }}>
+                <span style={{ display: "block", marginBottom: 4, fontWeight: 500 }}># Numéro de suivi</span>
+                <input type="text" value={form.numeroSuivi} onChange={(e) => setForm((f) => ({ ...f, numeroSuivi: e.target.value }))} placeholder="Ex. 6A12345678901" style={{ width: "100%", padding: "8px 12px", borderRadius: 8, border: "1px solid #8A8272", fontFamily: "'JetBrains Mono', monospace" }} />
+              </label>
+
+              <label style={{ fontSize: 14 }}>
+                <span style={{ display: "block", marginBottom: 4, fontWeight: 500 }}>Transporteur</span>
+                <select value={form.transporteur} onChange={(e) => setForm((f) => ({ ...f, transporteur: e.target.value }))} style={{ width: "100%", padding: "8px 12px", borderRadius: 8, border: "1px solid #8A8272", background: "#fff" }}>
+                  {TRANSPORTEURS.map((t) => <option key={t} value={t}>{t}</option>)}
+                </select>
+                {form.transporteur === "Autre" && <input type="text" placeholder="Nom du transporteur" value={form.transporteurAutre} onChange={(e) => setForm((f) => ({ ...f, transporteurAutre: e.target.value }))} style={{ width: "100%", padding: "8px 12px", borderRadius: 8, marginTop: 8, border: "1px solid #8A8272" }} />}
+              </label>
+
+              <label style={{ fontSize: 14 }}>
+                <span style={{ display: "block", marginBottom: 4, fontWeight: 500 }}>Lieu de livraison</span>
+                <select value={form.lieuChoice} onChange={(e) => setForm((f) => ({ ...f, lieuChoice: e.target.value }))} style={{ width: "100%", padding: "8px 12px", borderRadius: 8, border: "1px solid #8A8272", background: "#fff" }}>
+                  {lieux.map((l) => <option key={l.id} value={l.id}>{l.nom}</option>)}
+                  <option value="autre">+ Nouveau lieu…</option>
+                </select>
+                {form.lieuChoice && form.lieuChoice !== "autre" && (() => {
+                  const l = lieux.find((x) => x.id === form.lieuChoice);
+                  return l && (l.adresse || l.horaires) ? <div style={{ fontSize: 12, marginTop: 6, color: "#8A8272" }}>{l.adresse}{l.horaires ? ` · ${l.horaires}` : ""}</div> : null;
+                })()}
+                {form.lieuChoice === "autre" && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
+                    <input type="text" placeholder="Nom du lieu" value={form.lieuNomAutre} onChange={(e) => setForm((f) => ({ ...f, lieuNomAutre: e.target.value }))} style={{ width: "100%", padding: "8px 12px", borderRadius: 8, border: "1px solid #8A8272" }} />
+                    <input type="text" placeholder="Adresse (optionnel)" value={form.lieuAdresseAutre} onChange={(e) => setForm((f) => ({ ...f, lieuAdresseAutre: e.target.value }))} style={{ width: "100%", padding: "8px 12px", borderRadius: 8, border: "1px solid #8A8272" }} />
+                    <input type="text" placeholder="Horaires d'ouverture (optionnel)" value={form.lieuHorairesAutre} onChange={(e) => setForm((f) => ({ ...f, lieuHorairesAutre: e.target.value }))} style={{ width: "100%", padding: "8px 12px", borderRadius: 8, border: "1px solid #8A8272" }} />
+                    <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "#5c584d" }}>
+                      <input type="checkbox" checked={form.sauvegarderLieu} onChange={(e) => setForm((f) => ({ ...f, sauvegarderLieu: e.target.checked }))} />
+                      Enregistrer ce lieu pour la prochaine fois
+                    </label>
+                  </div>
+                )}
+              </label>
+
+              <label style={{ fontSize: 14 }}>
+                <span style={{ display: "block", marginBottom: 4, fontWeight: 500 }}>Statut</span>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  {STATUTS.map((s) => (
+                    <button type="button" key={s.id} onClick={() => setForm((f) => ({ ...f, statut: s.id }))} style={{
+                      border: `1.5px solid ${s.color}`, color: form.statut === s.id ? "#fff" : s.color,
+                      background: form.statut === s.id ? s.color : "transparent", padding: "5px 10px", borderRadius: 999, fontSize: 12, fontWeight: 500,
+                    }}>{s.label}</button>
+                  ))}
+                </div>
+              </label>
+
+              <label style={{ fontSize: 14 }}>
+                <span style={{ display: "block", marginBottom: 4, fontWeight: 500 }}>⏰ Date limite de retrait — facultatif</span>
+                <input type="date" value={form.dateLimiteRetrait} onChange={(e) => setForm((f) => ({ ...f, dateLimiteRetrait: e.target.value }))} style={{ width: "100%", padding: "8px 12px", borderRadius: 8, border: "1px solid #8A8272", background: "#fff" }} />
+                <span style={{ display: "block", marginTop: 4, fontSize: 12, color: "#8A8272" }}>À remplir dès que tu la connais, pour être alertée avant le retour à l'expéditeur.</span>
+              </label>
+
+              <label style={{ fontSize: 14 }}>
+                <span style={{ display: "block", marginBottom: 4, fontWeight: 500 }}>📷 Photo (QR code pour retirer le colis) — facultatif</span>
+                <input ref={fileInputRef} type="file" accept="image/*" onChange={handlePhotoChange} style={{ display: "none" }} />
+                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <button type="button" onClick={() => fileInputRef.current?.click()} disabled={photoBusy} style={{ padding: "8px 12px", borderRadius: 8, fontSize: 14, display: "flex", alignItems: "center", gap: 6, border: "1px solid #8A8272", background: "#fff" }}>
+                    📷 {photoBusy ? "Traitement…" : form.photo ? "Remplacer" : "Ajouter une photo"}
+                  </button>
+                  {form.photo && (
+                    <div style={{ position: "relative" }}>
+                      <img src={form.photo} alt="Aperçu" style={{ width: 44, height: 44, borderRadius: 8, objectFit: "cover" }} />
+                      <button type="button" onClick={() => setForm((f) => ({ ...f, photo: null }))} aria-label="Retirer la photo" style={{ position: "absolute", top: -6, right: -6, background: "#24291F", color: "#fff", borderRadius: 999, width: 18, height: 18, display: "flex", alignItems: "center", justifyContent: "center", border: "none", fontSize: 10, padding: 0 }}>✕</button>
+                    </div>
+                  )}
+                </div>
+              </label>
+            </div>
+
+            <button type="submit" style={{ width: "100%", marginTop: 22, padding: "12px", borderRadius: 12, fontWeight: 600, background: "#24291F", color: "#EDE6D6", border: "none", fontSize: 15 }}>
+              {editingId ? "Enregistrer les modifications" : "Ajouter ce colis"}
+            </button>
+          </form>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<SuiviColis />);
+</script>
+</body>
+</html>
