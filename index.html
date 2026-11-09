@@ -173,7 +173,7 @@ function SuiviColis() {
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [form, setForm] = useState(emptyForm);
-  const [filtre, setFiltre] = useState("tous");
+  const [filtre, setFiltre] = useState("cours");
   const [photoBusy, setPhotoBusy] = useState(false);
   const [viewerPhoto, setViewerPhoto] = useState(null);
   const [formError, setFormError] = useState("");
@@ -403,7 +403,7 @@ function SuiviColis() {
       </div>
 
       <div style={{ padding: "12px 20px 0", display: "flex", gap: 8, overflowX: "auto" }}>
-        {[{ id: "tous", label: "Tous" }, { id: "cours", label: "En cours" }, { id: "recuperes", label: "Récupérés" }].map((f) => (
+        {[{ id: "cours", label: `En cours (${enCoursCount})` }, { id: "recuperes", label: `Récupérés (${colis.length - enCoursCount})` }].map((f) => (
           <button key={f.id} onClick={() => setFiltre(f.id)} style={{
             background: filtre === f.id ? "#24291F" : "#F7F3E8",
             color: filtre === f.id ? "#EDE6D6" : "#24291F",
@@ -421,7 +421,7 @@ function SuiviColis() {
         {visibles.length === 0 && (
           <div style={{ textAlign: "center", padding: "64px 0", borderRadius: 16, background: "#F7F3E8", border: "1px dashed #8A8272" }}>
             <div style={{ fontSize: 28, marginBottom: 8 }}>📦</div>
-            <p style={{ color: "#5c584d", fontSize: 14 }}>{filtre === "recuperes" ? "Aucun colis récupéré pour l'instant." : "Ajoute ton premier colis à suivre."}</p>
+            <p style={{ color: "#5c584d", fontSize: 14 }}>{filtre === "recuperes" ? "Aucun colis récupéré pour l'instant." : colis.length > 0 ? "Aucun colis en cours — tout est récupéré !" : "Ajoute ton premier colis à suivre."}</p>
           </div>
         )}
 
