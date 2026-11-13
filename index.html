@@ -54,11 +54,12 @@ const TRANSPORTEURS = ["Colissimo", "Chronopost", "Mondial Relay", "UPS", "DPD",
 const STATUTS = [
   { id: "preparation", label: "En préparation", color: "#8A8272", emoji: "📦" },
   { id: "expedie", label: "Expédié", color: "#C08A2E", emoji: "🚚" },
-  { id: "transit", label: "En transit", color: "#B8452F", emoji: "🚚" },
   { id: "livre", label: "Livré au point de retrait", color: "#3D5A80", emoji: "📍" },
   { id: "recupere", label: "Récupéré", color: "#2F5F4A", emoji: "✅" },
 ];
-const statutInfo = (id) => STATUTS.find((s) => s.id === id) || STATUTS[0];
+const migrerStatut = (id) => (id === "transit" ? "expedie" : id);
+const migrerColis = (liste) => liste.map((c) => ({ ...c, statut: migrerStatut(c.statut) }));
+const statutInfo = (id) => STATUTS.find((s) => s.id === migrerStatut(id)) || STATUTS[0];
 
 const LIEUX_PAR_DEFAUT = [
   { id: "defaut-1", nom: "Pickup Jaurès", adresse: "Bd Jean Jaurès, Boulogne-Billancourt", horaires: "" },
@@ -165,7 +166,7 @@ const emptyForm = {
 const emptyLieuForm = { nom: "", adresse: "", horaires: "" };
 
 function SuiviColis() {
-  const [colis, setColis] = useState(() => chargerLocal("colis", []));
+  const [colis, setColis] = useState(() => migrerColis(chargerLocal("colis", [])));
   const [lieux, setLieux] = useState(() => {
     const saved = chargerLocal("lieux", null);
     return saved && saved.length ? saved : LIEUX_PAR_DEFAUT;
@@ -359,7 +360,7 @@ function SuiviColis() {
     reader.onload = () => {
       try {
         const data = JSON.parse(reader.result);
-        if (Array.isArray(data.colis)) setColis(data.colis);
+        if (Array.isArray(data.colis)) setColis(migrerColis(data.colis));
         if (Array.isArray(data.lieux) && data.lieux.length) setLieux(data.lieux);
         setImportMsg("Importé avec succès !");
       } catch (err) {
